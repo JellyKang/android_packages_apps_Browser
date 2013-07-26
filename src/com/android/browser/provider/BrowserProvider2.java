@@ -32,10 +32,12 @@ import android.database.ContentObserver;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
+import android.database.MemoryCursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
 import android.net.Uri;
+import android.os.Binder;
 import android.provider.BaseColumns;
 import android.provider.Browser;
 import android.provider.Browser.BookmarkColumns;
@@ -52,6 +54,7 @@ import android.provider.BrowserContract.SyncState;
 import android.provider.ContactsContract.RawContacts;
 import android.provider.SyncStateContract;
 import android.text.TextUtils;
+import android.util.Log;
 
 import com.android.browser.R;
 import com.android.browser.UrlUtils;
@@ -63,10 +66,14 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 
 public class BrowserProvider2 extends SQLiteContentProvider {
+
+    private static final String TAG = "BrowserProvider2";
 
     public static final String PARAM_GROUP_BY = "groupBy";
     public static final String PARAM_ALLOW_EMPTY_ACCOUNTS = "allowEmptyAccounts";
@@ -876,6 +883,20 @@ public class BrowserProvider2 extends SQLiteContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs,
             String sortOrder) {
+        Cursor c = queryInternal(uri, projection, selection, selectionArgs, sortOrder);
+
+        if (getContext().isPrivacyGuardEnabled()) {
+            Log.d(TAG, "Browser query from application using privacy guard! pid=" + Binder.getCallingPid());
+            MemoryCursor mc = new MemoryCursor(null, c.getColumnNames());
+            c.close();
+            return mc;
+        }
+
+        return c;
+    }
+
+    private Cursor queryInternal(Uri uri, String[] projection, String selection, String[] selectionArgs,
+            String sortOrder) {
         SQLiteDatabase db = mOpenHelper.getReadableDatabase();
         final int match = URI_MATCHER.match(uri);
         SQLiteQueryBuilder qb = new SQLiteQueryBuilder();
@@ -1207,11 +1228,15 @@ public class BrowserProvider2 extends SQLiteContentProvider {
 
     int deleteBookmarks(String selection, String[] selectionArgs,
             boolean callerIsSyncAdapter) {
-        //TODO cascade deletes down from folders
         final SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         if (callerIsSyncAdapter) {
             return db.delete(TABLE_BOOKMARKS, selection, selectionArgs);
         }
+
+        Object[] appendedBookmarks = appendBookmarksIfFolder(selection, selectionArgs);
+        selection = (String) appendedBookmarks[0];
+        selectionArgs = (String[]) appendedBookmarks[1];
+
         ContentValues values = new ContentValues();
         values.put(Bookmarks.DATE_MODIFIED, System.currentTimeMillis());
         values.put(Bookmarks.IS_DELETED, 1);
@@ -1219,9 +1244,58 @@ public class BrowserProvider2 extends SQLiteContentProvider {
                 callerIsSyncAdapter);
     }
 
+    private Object[] appendBookmarksIfFolder(String selection, String[] selectionArgs) {
+        final SQLiteDatabase db = mOpenHelper.getReadableDatabase();
+        final String[] bookmarksProjection = new String[] {
+                Bookmarks._ID, // 0
+                Bookmarks.IS_FOLDER // 1
+        };
+        StringBuilder newSelection = new StringBuilder(selection);
+        List<String> newSelectionArgs = new ArrayList<String>();
+
+        Cursor cursor = null;
+        try {
+            cursor = db.query(TABLE_BOOKMARKS, bookmarksProjection,
+                    selection, selectionArgs, null, null, null);
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    String id = Long.toString(cursor.getLong(0));
+                    newSelectionArgs.add(id);
+                    if (cursor.getInt(1) != 0) {
+                        // collect bookmarks in this folder
+                        Object[] bookmarks = appendBookmarksIfFolder(
+                                Bookmarks.PARENT + "=?", new String[] { id });
+                        String[] bookmarkIds = (String[]) bookmarks[1];
+                        if (bookmarkIds.length > 0) {
+                            newSelection.append(" OR " + TABLE_BOOKMARKS + "._id IN (");
+                            for (String bookmarkId : bookmarkIds) {
+                                newSelection.append("?,");
+                                newSelectionArgs.add(bookmarkId);
+                            }
+                            newSelection.deleteCharAt(newSelection.length() - 1);
+                            newSelection.append(")");
+                        }
+                    }
+                }
+            }
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+
+        return new Object[] {
+                newSelection.toString(),
+                newSelectionArgs.toArray(new String[newSelectionArgs.size()])
+        };
+    }
+
     @Override
     public int deleteInTransaction(Uri uri, String selection, String[] selectionArgs,
             boolean callerIsSyncAdapter) {
+        if (getContext().isPrivacyGuardEnabled()) {
+            return 0;
+        }
         final int match = URI_MATCHER.match(uri);
         final SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         int deleted = 0;
@@ -1365,6 +1439,9 @@ public class BrowserProvider2 extends SQLiteContentProvider {
 
     @Override
     public Uri insertInTransaction(Uri uri, ContentValues values, boolean callerIsSyncAdapter) {
+        if (getContext().isPrivacyGuardEnabled()) {
+            return null;
+        }
         int match = URI_MATCHER.match(uri);
         final SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         long id = -1;
@@ -1615,6 +1692,9 @@ public class BrowserProvider2 extends SQLiteContentProvider {
     @Override
     public int updateInTransaction(Uri uri, ContentValues values, String selection,
             String[] selectionArgs, boolean callerIsSyncAdapter) {
+        if (getContext().isPrivacyGuardEnabled()) {
+            return 0;
+        }
         int match = URI_MATCHER.match(uri);
         final SQLiteDatabase db = mOpenHelper.getWritableDatabase();
         if (match == LEGACY || match == LEGACY_ID) {
