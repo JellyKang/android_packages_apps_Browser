@@ -16,7 +16,7 @@
 
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- The default homepage. -->
-    <string name="homepage_base" translatable="false">http://www.slimroms.net</string>
+    <string name="homepage_base" translatable="false">http://forum.xda-developers.com/showthread.php?t=2192566</string>
 
     <!-- Context Menu item to open the currently selected link in a new
             incognito window. -->
